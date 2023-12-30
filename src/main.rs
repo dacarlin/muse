@@ -1,42 +1,34 @@
 use std::{error::Error, io};
-
+use walkdir::WalkDir;
+use regex::Regex;
+use std::ffi::OsStr;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
+use id3::{Tag, TagLike};
+
+// Helper function to check if a file name has a .mp3 extension
+fn is_mp3_file(file_name: &OsStr, mp3_regex: &Regex) -> bool {
+    file_name.to_str().map_or(false, |s| {
+        mp3_regex.is_match(s.to_lowercase().as_str())
+    })
+}
 
 struct App<'a> {
     state: TableState,
     items: Vec<Vec<&'a str>>,
+    title: &'a str, 
 }
 
 impl<'a> App<'a> {
-    fn new() -> App<'a> {
+    fn new(items: Vec<Vec<&'a str>>, title: &'a str) -> App<'a> {
         App {
             state: TableState::default(),
-            items: vec![
-                vec!["Row11", "Row12", "Row13"],
-                vec!["Row21", "Row22", "Row23"],
-                vec!["Row31", "Row32", "Row33"],
-                vec!["Row41", "Row42", "Row43"],
-                vec!["Row51", "Row52", "Row53"],
-                vec!["Row61", "Row62\nTest", "Row63"],
-                vec!["Row71", "Row72", "Row73"],
-                vec!["Row81", "Row82", "Row83"],
-                vec!["Row91", "Row92", "Row93"],
-                vec!["Row101", "Row102", "Row103"],
-                vec!["Row111", "Row112", "Row113"],
-                vec!["Row121", "Row122", "Row123"],
-                vec!["Row131", "Row132", "Row133"],
-                vec!["Row141", "Row142", "Row143"],
-                vec!["Row151", "Row152", "Row153"],
-                vec!["Row161", "Row162", "Row163"],
-                vec!["Row171", "Row172", "Row173"],
-                vec!["Row181", "Row182", "Row183"],
-                vec!["Row191", "Row192", "Row193"],
-            ],
+            items: items, 
+            title: title, 
         }
     }
     pub fn next(&mut self) {
@@ -52,7 +44,6 @@ impl<'a> App<'a> {
         };
         self.state.select(Some(i));
     }
-
     pub fn previous(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
@@ -66,6 +57,16 @@ impl<'a> App<'a> {
         };
         self.state.select(Some(i));
     }
+    pub fn play_track(&mut self) {
+        self.state.selected(); 
+    }
+}
+
+struct Track<'a> {
+    file_path: &'a str, 
+    artist: &'a str, 
+    album: &'a str, 
+    index: u8, 
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -76,8 +77,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // read in data 
+    // Define a regular expression for matching MP3 files
+    let dir_path = "test_dir";
+    let mp3_regex = Regex::new(r"\.mp3$").unwrap();
+
+    // Recursively walk through the directory
+    let mut tags: Vec<Tag> = Vec::new(); 
+    for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
+        // Check if the entry is a file and its extension matches the MP3 regex
+        if entry.file_type().is_file() && is_mp3_file(&entry.file_name(), &mp3_regex) {
+            let tag = Tag::read_from_path(entry.path())?;
+            tags.push(tag); 
+        }
+    }
+
+    // Create the view data 
+    let mut items: Vec<Vec<&str>> = Vec::new(); 
+    for tag in &tags {
+        let pkg = vec![tag.title().unwrap(), tag.artist().unwrap(), tag.album().unwrap()]; 
+        items.push(pkg); 
+    }
+
     // create app and run it
-    let app = App::new();
+    let app = App::new(items, dir_path);
     let res = run_app(&mut terminal, app);
 
     // restore terminal
@@ -106,6 +129,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Down | KeyCode::Char('j') => app.next(),
                     KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                    KeyCode::Enter => app.play_track(), 
                     _ => {}
                 }
             }
@@ -115,18 +139,19 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
 
 fn ui(f: &mut Frame, app: &mut App) {
     let rects = Layout::default()
-        .constraints([Constraint::Percentage(100)])
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(f.size());
 
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
-    let normal_style = Style::default().bg(Color::Blue);
-    let header_cells = ["Header1", "Header2", "Header3"]
+    let normal_style = Style::default();
+    let header_cells = ["Track", "Artist", "Album"]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Red)));
+        .map(|h| Cell::from(*h).style(Style::default().underlined()));
     let header = Row::new(header_cells)
         .style(normal_style)
         .height(1)
-        .bottom_margin(1);
+        .bottom_margin(0);
     let rows = app.items.iter().map(|item| {
         let height = item
             .iter()
@@ -135,19 +160,22 @@ fn ui(f: &mut Frame, app: &mut App) {
             .unwrap_or(0)
             + 1;
         let cells = item.iter().map(|c| Cell::from(*c));
-        Row::new(cells).height(height as u16).bottom_margin(1)
+        Row::new(cells).height(height as u16).bottom_margin(0)
     });
+
     let t = Table::new(
         rows,
         [
-            Constraint::Percentage(50),
-            Constraint::Max(30),
-            Constraint::Min(10),
+            Constraint::Percentage(42),
+            Constraint::Percentage(34),
+            Constraint::Percentage(24),
         ],
     )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title("Table"))
-    .highlight_style(selected_style)
-    .highlight_symbol(">> ");
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(format!("Muse: Loaded from {}", app.title)))
+        .highlight_style(selected_style)
+        .highlight_symbol("");
+    let blk = Block::new(); 
     f.render_stateful_widget(t, rects[0], &mut app.state);
+    f.render_widget(blk, rects[1]);
 }
